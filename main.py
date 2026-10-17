@@ -10,7 +10,7 @@ import aiohttp
 from discord import app_commands
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-BUILD_ID = "normal-upload-workaround-2026-10-17-v1"
+BUILD_ID = "slash-attachment-scan-2026-10-17-v1"
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 MAX_TOTAL_UNCOMPRESSED = 60 * 1024 * 1024
 MAX_ENTRIES = 1500
@@ -161,11 +161,6 @@ def make_embed(filename, size, verdict, findings, notes):
 ARCHIVE_CHANNEL_ID = 1560707571109855353
 
 
-# A slash-command attachment picker can be restrictive on some mobile clients.
-# /scan now arms a short-lived request; users then upload the JAR as a normal message.
-pending_scans = {}
-PENDING_SCAN_SECONDS = 180
-
 
 async def process_attachment(attachment, channel, user, origin_channel_id):
     if not attachment.filename.lower().endswith(".jar"):
@@ -234,31 +229,15 @@ async def process_attachment(attachment, channel, user, origin_channel_id):
         await channel.send(f"Scan/archive failed during {stage}: {type(exc).__name__}. Check Replit Console.")
 
 
-@tree.command(name="scan", description="Start a Minecraft JAR scan (upload the file as a normal message)")
-async def scan(interaction: discord.Interaction):
-    pending_scans[(interaction.channel_id, interaction.user.id)] = time.monotonic() + PENDING_SCAN_SECONDS
+@tree.command(name="scan", description="Privately submit a Minecraft JAR for scanning")
+@app_commands.describe(file="The Minecraft Java .jar file to scan")
+async def scan(interaction: discord.Interaction, file: discord.Attachment):
+    # The attachment is supplied directly to the slash command, not posted as a normal message.
     await interaction.response.send_message(
-        "Now upload your Minecraft `.jar` as a normal message in this channel within 3 minutes. I'll archive the file in the security channel and post the scan report here.",
-        ephemeral=False,
+        "File received. Scanning now; the submitted sample will also be copied to the security archive channel.",
+        ephemeral=True,
     )
-
-
-@client.event
-async def on_message(message: discord.Message):
-    if message.author.bot or not message.attachments:
-        return
-
-    key = (message.channel.id, message.author.id)
-    expiry = pending_scans.get(key)
-    if expiry is None:
-        return
-    if time.monotonic() > expiry:
-        pending_scans.pop(key, None)
-        await message.channel.send("Your scan request expired. Run `/scan` again, then upload the JAR as a normal message.")
-        return
-
-    pending_scans.pop(key, None)
-    await process_attachment(message.attachments[0], message.channel, message.author, message.channel.id)
+    await process_attachment(file, interaction.channel, interaction.user, interaction.channel_id)
 
 
 @client.event
