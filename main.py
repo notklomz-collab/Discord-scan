@@ -154,6 +154,9 @@ def make_embed(filename, size, verdict, findings, notes):
     return embed
 
 
+ARCHIVE_CHANNEL_ID = 1560707571109855353
+
+
 @tree.command(name="scan", description="Scan a Minecraft Java JAR for suspicious indicators")
 @app_commands.describe(file="Minecraft mod/client JAR to inspect")
 async def scan(interaction: discord.Interaction, file: discord.Attachment):
@@ -163,16 +166,52 @@ async def scan(interaction: discord.Interaction, file: discord.Attachment):
     if file.size > MAX_UPLOAD_BYTES:
         await interaction.response.send_message("Maximum scan size is 20 MB.", ephemeral=True)
         return
+
     await interaction.response.defer(thinking=True)
     try:
         data = await file.read(use_cached=True)
         if len(data) > MAX_UPLOAD_BYTES:
             await interaction.followup.send("The file exceeded the 20 MB scan limit.", ephemeral=True)
             return
+
+        # Archive every submitted JAR in the dedicated review channel.
+        # The original file is treated as untrusted and is never executed.
+        archive_channel = client.get_channel(ARCHIVE_CHANNEL_ID)
+        if archive_channel is None:
+            archive_channel = await client.fetch_channel(ARCHIVE_CHANNEL_ID)
+        if not hasattr(archive_channel, "send"):
+            await interaction.followup.send(
+                "The archive channel is not a text channel. Please check ARCHIVE_CHANNEL_ID.",
+                ephemeral=True,
+            )
+            return
+
+        archive_embed = discord.Embed(
+            title="UNTRUSTED JAR UPLOAD",
+            description="Uploaded sample for moderator/security review. Do not download or run unless you know how to analyze malware safely.",
+            color=discord.Color.dark_grey(),
+        )
+        archive_embed.add_field(name="Submitted filename", value=discord.utils.escape_markdown(file.filename)[:200], inline=False)
+        archive_embed.add_field(name="Submitted by", value=f"{interaction.user} (ID: {interaction.user.id})", inline=False)
+        archive_embed.add_field(name="Origin", value=f"<#{interaction.channel_id}>", inline=True)
+        archive_embed.add_field(name="Scan status", value="Analysis in progress", inline=True)
+        await archive_channel.send(
+            embed=archive_embed,
+            file=discord.File(io.BytesIO(data), filename=file.filename),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
         verdict, findings, notes = await asyncio.to_thread(scan_jar, data)
-        await interaction.followup.send(embed=make_embed(file.filename, len(data), verdict, findings, notes))
+        report = make_embed(file.filename, len(data), verdict, findings, notes)
+        report.add_field(name="Archived sample", value=f"Original upload was saved to <#{ARCHIVE_CHANNEL_ID}> for review.", inline=False)
+        await interaction.followup.send(embed=report)
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "I couldn't archive the file. Give the bot View Channel, Send Messages, and Attach Files permissions in the archive channel.",
+            ephemeral=True,
+        )
     except (discord.HTTPException, asyncio.TimeoutError, OSError) as exc:
-        await interaction.followup.send(f"Scan failed ({type(exc).__name__}). Try a smaller JAR.", ephemeral=True)
+        await interaction.followup.send(f"Scan or archive failed ({type(exc).__name__}). Check the bot's channel permissions and try again.", ephemeral=True)
 
 
 @client.event
