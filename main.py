@@ -151,8 +151,11 @@ def scan_jar(data):
     elif findings:
         verdict = "LOW SIGNALS"
     else:
-        verdict = "NO MATCHES"
-        notes.append("No configured indicators matched. This does NOT prove the JAR is safe.")
+        if spotify:
+            verdict = "INFO"
+        else:
+            verdict = "NO MATCHES"
+        notes.append("No configured risk indicators matched. This does NOT prove the JAR is safe.")
     return verdict, findings, notes
 
 
@@ -162,6 +165,7 @@ def make_embed(filename, size, verdict, findings, notes):
         "REVIEW": discord.Color.orange(),
         "LOW SIGNALS": discord.Color.gold(),
         "NO MATCHES": discord.Color.green(),
+        "INFO": discord.Color.blue(),
         "INVALID": discord.Color.dark_grey(),
         "LIMIT EXCEEDED": discord.Color.dark_grey(),
     }
@@ -170,6 +174,7 @@ def make_embed(filename, size, verdict, findings, notes):
         "REVIEW": "Potentially concerning or cheat-related indicators found. Review the evidence.",
         "LOW SIGNALS": "A few indicators matched, but they do not establish malicious behavior.",
         "NO MATCHES": "No configured indicators matched. This is not a guarantee of safety.",
+        "INFO": "Spotify-related strings were found and no configured risk indicators matched. This is context, not proof of safety.",
         "INVALID": "The attachment could not be analyzed as a readable JAR archive.",
         "LIMIT EXCEEDED": "The archive exceeded scan safety limits and was not fully analyzed.",
     }
