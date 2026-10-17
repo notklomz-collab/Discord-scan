@@ -2,6 +2,7 @@ import asyncio
 import io
 import os
 import re
+import time
 import zipfile
 
 import discord
@@ -9,13 +10,14 @@ import aiohttp
 from discord import app_commands
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-BUILD_ID = "archive-diagnostic-2026-10-17-v2"
+BUILD_ID = "normal-upload-workaround-2026-10-17-v1"
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 MAX_TOTAL_UNCOMPRESSED = 60 * 1024 * 1024
 MAX_ENTRIES = 1500
 MAX_ENTRY_BYTES = 8 * 1024 * 1024
 
 intents = discord.Intents.default()
+intents.message_content = True
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
@@ -159,42 +161,38 @@ def make_embed(filename, size, verdict, findings, notes):
 ARCHIVE_CHANNEL_ID = 1560707571109855353
 
 
-@tree.command(name="scan", description="Scan a Minecraft Java JAR for suspicious indicators")
-@app_commands.describe(file="Minecraft mod/client JAR to inspect")
-async def scan(interaction: discord.Interaction, file: discord.Attachment):
-    if not file.filename.lower().endswith(".jar"):
-        await interaction.response.send_message("Please upload a Minecraft Java .jar file.", ephemeral=True)
+# A slash-command attachment picker can be restrictive on some mobile clients.
+# /scan now arms a short-lived request; users then upload the JAR as a normal message.
+pending_scans = {}
+PENDING_SCAN_SECONDS = 180
+
+
+async def process_attachment(attachment, channel, user, origin_channel_id):
+    if not attachment.filename.lower().endswith(".jar"):
+        await channel.send("Please upload a Minecraft Java `.jar` file.")
         return
-    if file.size > MAX_UPLOAD_BYTES:
-        await interaction.response.send_message("Maximum scan size is 20 MB.", ephemeral=True)
+    if attachment.size > MAX_UPLOAD_BYTES:
+        await channel.send("Maximum scan size is 20 MB.")
         return
 
-    await interaction.response.defer(thinking=True)
-    stage = "reading uploaded file"
+    stage = "downloading uploaded file"
     try:
-        # Download directly from Discord's signed CDN URL. Attachment.read() can
-        # return HTTP 415 "failed to get asset" in some Replit/runtime setups.
         timeout = aiohttp.ClientTimeout(total=45, connect=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(file.url) as response:
+            async with session.get(attachment.url) as response:
                 if response.status != 200:
                     raise RuntimeError(f"Attachment CDN returned HTTP {response.status}")
                 data = await response.read()
         if len(data) > MAX_UPLOAD_BYTES:
-            await interaction.followup.send("The file exceeded the 20 MB scan limit.", ephemeral=True)
+            await channel.send("The file exceeded the 20 MB scan limit.")
             return
 
         stage = "fetching archive channel"
-        # Archive every submitted JAR in the dedicated review channel.
-        # The original file is treated as untrusted and is never executed.
         archive_channel = client.get_channel(ARCHIVE_CHANNEL_ID)
         if archive_channel is None:
             archive_channel = await client.fetch_channel(ARCHIVE_CHANNEL_ID)
         if not hasattr(archive_channel, "send"):
-            await interaction.followup.send(
-                "The archive channel is not a text channel. Please check ARCHIVE_CHANNEL_ID.",
-                ephemeral=True,
-            )
+            await channel.send("The archive channel is not a text channel. Please check ARCHIVE_CHANNEL_ID.")
             return
 
         archive_embed = discord.Embed(
@@ -202,52 +200,65 @@ async def scan(interaction: discord.Interaction, file: discord.Attachment):
             description="Uploaded sample for moderator/security review. Do not download or run unless you know how to analyze malware safely.",
             color=discord.Color.dark_grey(),
         )
-        archive_embed.add_field(name="Submitted filename", value=discord.utils.escape_markdown(file.filename)[:200], inline=False)
-        archive_embed.add_field(name="Submitted by", value=f"{interaction.user} (ID: {interaction.user.id})", inline=False)
-        archive_embed.add_field(name="Origin", value=f"<#{interaction.channel_id}>", inline=True)
+        archive_embed.add_field(name="Submitted filename", value=discord.utils.escape_markdown(attachment.filename)[:200], inline=False)
+        archive_embed.add_field(name="Submitted by", value=f"{user} (ID: {user.id})", inline=False)
+        archive_embed.add_field(name="Origin", value=f"<#{origin_channel_id}>", inline=True)
         archive_embed.add_field(name="Scan status", value="Analysis in progress", inline=True)
+
         stage = "uploading JAR to archive channel"
-        # Send the file as a plain attachment first. This avoids coupling the
-        # binary upload to an embed request and makes failures easier to diagnose.
         await archive_channel.send(
             content="UNTRUSTED JAR UPLOAD for security review. Do not run this file.",
-            file=discord.File(io.BytesIO(data), filename=f"scan-upload-{interaction.id}.jar"),
+            file=discord.File(io.BytesIO(data), filename=f"scan-upload-{user.id}-{int(time.time())}.jar"),
             allowed_mentions=discord.AllowedMentions.none(),
         )
-        stage = "sending archive metadata"
         try:
-            await archive_channel.send(
-                embed=archive_embed,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+            await archive_channel.send(embed=archive_embed, allowed_mentions=discord.AllowedMentions.none())
         except discord.HTTPException as metadata_exc:
             print(f"Archive metadata message failed after file upload: status={metadata_exc.status}, code={metadata_exc.code}, text={metadata_exc.text}")
 
         stage = "scanning JAR"
         verdict, findings, notes = await asyncio.to_thread(scan_jar, data)
-        report = make_embed(file.filename, len(data), verdict, findings, notes)
-        report.add_field(name="Archived sample", value=f"Original upload was saved to <#{ARCHIVE_CHANNEL_ID}> for review.", inline=False)
-        stage = "sending scan report to original channel"
+        report = make_embed(attachment.filename, len(data), verdict, findings, notes)
+        report.add_field(name="Archived sample", value=f"Submitted sample was copied to <#{ARCHIVE_CHANNEL_ID}>.", inline=False)
         report.set_footer(text=f"Build {BUILD_ID} | Do not run suspicious JARs")
-        await interaction.followup.send(embed=report)
+        stage = "sending report to upload channel"
+        await channel.send(embed=report, allowed_mentions=discord.AllowedMentions.none())
     except discord.Forbidden as exc:
         print(f"Discord permission error during {stage}: status={exc.status}, code={exc.code}, text={exc.text}")
-        await interaction.followup.send(
-            f"Discord denied action during {stage} (HTTP {exc.status}, code {exc.code}). Build: {BUILD_ID}. Check Replit Console.",
-            ephemeral=True,
-        )
+        await channel.send(f"Discord denied an action during {stage} (HTTP {exc.status}, code {exc.code}). Check Replit Console.")
     except discord.HTTPException as exc:
         print(f"Discord HTTP error during {stage}: status={exc.status}, code={exc.code}, text={exc.text}")
-        await interaction.followup.send(
-            f"Discord request failed during {stage} (HTTP {exc.status}, code {exc.code}). Build: {BUILD_ID}. Check Replit Console.",
-            ephemeral=True,
-        )
+        await channel.send(f"Discord request failed during {stage} (HTTP {exc.status}, code {exc.code}). Build: {BUILD_ID}.")
     except (asyncio.TimeoutError, OSError, RuntimeError, aiohttp.ClientError) as exc:
         print(f"Scan/archive error during {stage}: {type(exc).__name__}: {exc}")
-        await interaction.followup.send(
-            f"Scan/archive failed during {stage}: {type(exc).__name__}. Build: {BUILD_ID}. Check Replit Console.",
-            ephemeral=True,
-        )
+        await channel.send(f"Scan/archive failed during {stage}: {type(exc).__name__}. Check Replit Console.")
+
+
+@tree.command(name="scan", description="Start a Minecraft JAR scan (upload the file as a normal message)")
+async def scan(interaction: discord.Interaction):
+    pending_scans[(interaction.channel_id, interaction.user.id)] = time.monotonic() + PENDING_SCAN_SECONDS
+    await interaction.response.send_message(
+        "Now upload your Minecraft `.jar` as a normal message in this channel within 3 minutes. I'll archive the file in the security channel and post the scan report here.",
+        ephemeral=False,
+    )
+
+
+@client.event
+async def on_message(message: discord.Message):
+    if message.author.bot or not message.attachments:
+        return
+
+    key = (message.channel.id, message.author.id)
+    expiry = pending_scans.get(key)
+    if expiry is None:
+        return
+    if time.monotonic() > expiry:
+        pending_scans.pop(key, None)
+        await message.channel.send("Your scan request expired. Run `/scan` again, then upload the JAR as a normal message.")
+        return
+
+    pending_scans.pop(key, None)
+    await process_attachment(message.attachments[0], message.channel, message.author, message.channel.id)
 
 
 @client.event
