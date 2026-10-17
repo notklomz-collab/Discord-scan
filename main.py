@@ -10,7 +10,7 @@ import aiohttp
 from discord import app_commands
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-BUILD_ID = "original-filename-archive-2026-10-17-v1"
+BUILD_ID = "expanded-static-analysis-2026-10-17-v1"
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 MAX_TOTAL_UNCOMPRESSED = 60 * 1024 * 1024
 MAX_ENTRIES = 1500
@@ -21,36 +21,47 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
-# Static heuristics: indicators are evidence to review, not proof of malware.
+# Static analysis only. Findings are indicators, not proof of malware.
 RULES = [
-    ("HIGH", "Minecraft account-file reference",
-     r"(launcher_accounts\.json|launcher_profiles\.json|\.minecraft[/\\].*(?:accounts|profiles))",
-     "References Minecraft launcher/account-related files."),
-    ("HIGH", "Discord token or webhook-related string",
-     r"(discord(?:app)?\.com/api/webhooks|mfa\.[A-Za-z0-9_-]{20,}|(?:discord|authorization)[ _-]?token|/api/v\d+/users/@me)",
+    ("HIGH", "Minecraft session/account access",
+     r"(launcher_accounts\.json|launcher_profiles\.json|\.minecraft[/\\].*(?:accounts|profiles)|accessToken|refreshToken|minecraftServices|msa.*token)",
+     "References Minecraft launcher/session credentials or account data. Confirm surrounding code before concluding theft."),
+    ("HIGH", "Discord credential/API access",
+     r"(discord(?:app)?\.com/api/webhooks|mfa\.[A-Za-z0-9_-]{20,}|discord[_ -]?token|authorization[_ -]?token|/api/v\d+/users/@me)",
      "Contains Discord token, account API, or webhook-related strings."),
-    ("HIGH", "Network communication API",
-     r"(HttpURLConnection|HttpsURLConnection|okhttp3?[/\.]|java/net/Socket|WebSocket|multipart/form-data)",
-     "Contains networking code. Review alongside sensitive-file access."),
-    ("HIGH", "Process or shell execution",
-     r"(java/lang/Runtime|java/lang/ProcessBuilder|\.exec\s*\(|powershell(?:\.exe)?|cmd\.exe|/bin/(?:sh|bash))",
-     "May launch external processes or commands."),
-    ("MEDIUM", "Sensitive local-data reference",
-     r"(user\.home|APPDATA|Local AppData|\.minecraft|login_data|Cookies|LevelDB)",
-     "References user or application data locations."),
-    ("MEDIUM", "Dynamic loading or reflection",
-     r"(java/lang/reflect|ClassLoader|defineClass|MethodHandles|javax/script|URLClassLoader)",
-     "Can load or invoke code dynamically, limiting static analysis."),
-    ("LOW", "Encoding, encryption, or compression API",
-     r"(java/util/Base64|javax/crypto|Cipher\.getInstance|InflaterInputStream|GZIPInputStream)",
-     "These APIs can transform data but are also common in legitimate software."),
-    ("MEDIUM", "Keyboard/input monitoring API",
-     r"(java/awt/Robot|org/jnativehook|GlobalScreen|KeyListener)",
-     "References input-monitoring APIs."),
+    ("HIGH", "Credential-store or browser-data access",
+     r"(Login Data|Local State|Cookies|Network/Cookies|key4\.db|logins\.json|CryptUnprotectData|os_crypt|DPAPI)",
+     "References browser or operating-system credential stores. These strings need contextual review."),
+    ("HIGH", "Command or process execution",
+     r"(java/lang/Runtime|java/lang/ProcessBuilder|powershell(?:\.exe)?|cmd\.exe|/bin/(?:sh|bash)|Runtime\.getRuntime)",
+     "May start an external process or shell command."),
+    ("HIGH", "Remote payload or dynamic code loading",
+     r"(URLClassLoader|defineClass|ClassLoader\.defineClass|Instrumentation\.appendToSystemClassLoaderSearch|ScriptEngineManager)",
+     "May load code dynamically; this can hide behavior from static scanning."),
+    ("MEDIUM", "Network communication API",
+     r"(HttpURLConnection|HttpsURLConnection|okhttp3?[/\.]|java/net/Socket|WebSocket|multipart/form-data|java/net/http/HttpClient)",
+     "Network APIs are common in legitimate mods too. Destination and nearby code matter."),
+    ("MEDIUM", "Local sensitive-data paths",
+     r"(user\.home|APPDATA|\.minecraft|\.config|Local AppData|LevelDB|login_data)",
+     "References local user or application data."),
+    ("MEDIUM", "Reflection or obfuscation-related API",
+     r"(java/lang/reflect|MethodHandles|invokedynamic|Base64\.getDecoder|StringBuilder\.reverse)",
+     "May support dynamic behavior or obfuscation, but these are also common in normal software."),
+    ("MEDIUM", "Input monitoring API",
+     r"(org/jnativehook|GlobalScreen|Robot\.getPixelColor|addKeyListener|Keyboard\.isKeyDown)",
+     "References input or keyboard APIs; review context for keylogging versus normal game input."),
+    ("MEDIUM", "Potential Minecraft cheat feature",
+     r"(KillAura|AimAssist|AutoClicker|Velocity\s*(?:Module|Hack)?|Reach\s*(?:Module|Hack)?|Scaffold(?:Walk)?|TriggerBot|NoFall|AntiKnockback|ChestStealer|AutoTotem|Xray(?:Module)?|ESP(?:Module)?|FlyHack|SpeedHack)",
+     "Contains a known cheat-feature name. Names alone do not prove the mod implements or enables cheating."),
+    ("LOW", "Encryption, encoding, or compression",
+     r"(javax/crypto|Cipher\.getInstance|java/util/Base64|InflaterInputStream|GZIPInputStream|DeflaterOutputStream)",
+     "Common in legitimate software; suspicious only when combined with other evidence."),
 ]
-
-TEXT_EXTENSIONS = (".json", ".mf", ".txt", ".properties", ".xml", ".yml", ".yaml", ".cfg", ".conf", ".html", ".js")
+TEXT_EXTENSIONS = (".json", ".mf", ".txt", ".properties", ".xml", ".yml", ".yaml", ".cfg", ".conf", ".html", ".js", ".toml")
 STRING_RE = re.compile(rb"[\x20-\x7e]{5,}")
+URL_RE = re.compile(r"https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]{4,}", re.IGNORECASE)
+DOMAIN_RE = re.compile(r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|io|gg|dev|app|xyz|ru|cn|info|co|uk|me|de|fr|jp|cloud|site|online)\b")
+SPOTIFY_DOMAINS = {"api.spotify.com", "accounts.spotify.com", "open.spotify.com", "spclient.wg.spotify.com", "apresolve.spotify.com", "gew1-spclient.spotify.com", "spotify.com"}
 
 
 def extract_strings(data):
@@ -58,7 +69,7 @@ def extract_strings(data):
 
 
 def scan_jar(data):
-    findings, notes, parts = [], [], []
+    findings, notes, parts, entry_names = [], [], [], []
     if not zipfile.is_zipfile(io.BytesIO(data)):
         return "INVALID", findings, ["Not a readable ZIP/JAR archive."]
     try:
@@ -74,6 +85,7 @@ def scan_jar(data):
                 total += info.file_size
                 if total > MAX_TOTAL_UNCOMPRESSED:
                     return "LIMIT EXCEEDED", findings, ["Expanded archive exceeds the safe scan limit."]
+                entry_names.append(info.filename)
                 if info.file_size > MAX_ENTRY_BYTES:
                     notes.append("Skipped oversized entry: " + info.filename[:80])
                     continue
@@ -93,16 +105,48 @@ def scan_jar(data):
 
     text = "\n".join(parts)
     for severity, title, pattern, explanation in RULES:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            evidence = match.group(0)[:80].replace("\n", " ")
-            findings.append((severity, title, explanation + " Example string: " + repr(evidence)))
+        matches = list(re.finditer(pattern, text, re.IGNORECASE))
+        if matches:
+            examples = list(dict.fromkeys(m.group(0)[:65].replace("\n", " ") for m in matches[:3]))
+            findings.append((severity, title, explanation + " Evidence: " + ", ".join(repr(x) for x in examples) + f" ({len(matches)} string match(es))."))
+
+    # Identify endpoints mentioned in readable strings. This cannot prove they are contacted at runtime.
+    domains = set()
+    for raw_url in URL_RE.findall(text):
+        try:
+            host = re.sub(r"^https?://", "", raw_url, flags=re.IGNORECASE).split("/")[0].split(":")[0].lower()
+            if host:
+                domains.add(host)
+        except Exception:
+            pass
+    for domain in DOMAIN_RE.findall(text):
+        domains.add(domain.lower())
+    spotify = sorted(d for d in domains if d == "spotify.com" or d.endswith(".spotify.com"))
+    other_domains = sorted(d for d in domains if d not in spotify)
+    if spotify:
+        notes.append("Spotify-related endpoint strings found: " + ", ".join(spotify[:8]) + ". This is consistent with Spotify integration but does not prove a connection occurs or that the JAR is safe.")
+    if other_domains:
+        notes.append("Other domain strings found (not proof of live connections): " + ", ".join(other_domains[:12]))
+        if len(other_domains) > 12:
+            notes.append(f"{len(other_domains) - 12} additional domain(s) omitted.")
+    if not domains:
+        notes.append("No readable URL/domain strings found; encrypted, constructed, or runtime-fetched endpoints may not be visible.")
+
+    names_lower = "\n".join(entry_names).lower()
+    if "fabric.mod.json" in names_lower:
+        notes.append("Fabric metadata file present.")
+    if "META-INF/mods.toml" in names_lower or "mods.toml" in names_lower:
+        notes.append("Forge/NeoForge-style mods.toml metadata file present.")
+    if "meta-inf/manifest.mf" in names_lower:
+        notes.append("JAR manifest present.")
+    notes.append(f"Archive inventory: {len(entry_names)} file entries; Java classes: {sum(1 for n in entry_names if n.lower().endswith('.class'))}.")
 
     high = sum(1 for sev, _, _ in findings if sev == "HIGH")
     medium = sum(1 for sev, _, _ in findings if sev == "MEDIUM")
+    cheat = any("cheat feature" in title.lower() for _, title, _ in findings)
     if high >= 2 or (high >= 1 and medium >= 1):
         verdict = "SUSPICIOUS"
-    elif high == 1 or medium >= 2:
+    elif high == 1 or medium >= 2 or cheat:
         verdict = "REVIEW"
     elif findings:
         verdict = "LOW SIGNALS"
@@ -122,39 +166,45 @@ def make_embed(filename, size, verdict, findings, notes):
         "LIMIT EXCEEDED": discord.Color.dark_grey(),
     }
     summaries = {
-        "SUSPICIOUS": "Multiple high-risk indicators found. Do not run this JAR until investigated.",
-        "REVIEW": "Potentially concerning indicators found. Review the evidence before running it.",
-        "LOW SIGNALS": "Some indicators found, but they do not prove malicious behavior.",
-        "NO MATCHES": "No configured indicators matched. This is not a clean bill of health.",
-        "INVALID": "The attachment could not be analyzed as a JAR archive.",
-        "LIMIT EXCEEDED": "The archive exceeded safety limits and was not fully analyzed.",
+        "SUSPICIOUS": "Several high-risk indicators matched. Treat as unsafe until investigated.",
+        "REVIEW": "Potentially concerning or cheat-related indicators found. Review the evidence.",
+        "LOW SIGNALS": "A few indicators matched, but they do not establish malicious behavior.",
+        "NO MATCHES": "No configured indicators matched. This is not a guarantee of safety.",
+        "INVALID": "The attachment could not be analyzed as a readable JAR archive.",
+        "LIMIT EXCEEDED": "The archive exceeded scan safety limits and was not fully analyzed.",
     }
-    embed = discord.Embed(title="MINECRAFT JAR THREAT REPORT", description=summaries.get(verdict, "Analysis incomplete."), color=colors.get(verdict, discord.Color.blurple()))
+    embed = discord.Embed(title="MINECRAFT JAR THREAT INTELLIGENCE REPORT", description=summaries.get(verdict, "Analysis incomplete."), color=colors.get(verdict, discord.Color.blurple()))
     embed.add_field(name="FILE", value=discord.utils.escape_markdown(filename)[:200], inline=False)
     embed.add_field(name="VERDICT", value=verdict, inline=True)
     embed.add_field(name="SIZE", value=f"{size / 1024:.1f} KB", inline=True)
+    embed.add_field(name="SCAN TYPE", value="Static inspection; file was not executed", inline=True)
+
+    titles = [title.lower() for _, title, _ in findings]
+    if any("minecraft session" in t or "credential-store" in t or "discord credential" in t for t in titles):
+        classification = "Credential-access indicators present; theft is not confirmed from strings alone"
+    elif any("cheat feature" in t for t in titles):
+        classification = "Minecraft cheat-feature strings detected; functionality requires code-level confirmation"
+    elif any("remote payload" in t or "process execution" in t for t in titles):
+        classification = "Possible loader or process-launch behavior; inspect code paths"
+    elif findings:
+        classification = "Mixed behavior indicators; no malware family assigned"
+    else:
+        classification = "No configured indicators matched; status remains unverified"
+    embed.add_field(name="BEHAVIOR ASSESSMENT", value=classification, inline=False)
 
     if findings:
-        high = sum(1 for sev, _, _ in findings if sev == "HIGH")
-        if high >= 2:
-            classification = "Potential credential stealer or loader; requires manual confirmation"
-        elif any("Network communication" in title for _, title, _ in findings) and any("account-file" in title for _, title, _ in findings):
-            classification = "Possible Minecraft account stealer behavior"
-        elif any("Process or shell" in title for _, title, _ in findings):
-            classification = "Possible process launcher or staged payload behavior"
-        else:
-            classification = "Suspicious behavior indicators; malware family not identified"
-        embed.add_field(name="CLASSIFICATION", value=classification, inline=False)
-        embed.add_field(name="EVIDENCE", value="\n\n".join(f"[{sev}] {title}\n{detail}" for sev, title, detail in findings[:5])[:1024], inline=False)
-        if len(findings) > 5:
-            embed.add_field(name="Additional matches", value=f"{len(findings) - 5} more indicators omitted.", inline=False)
+        ordered = sorted(findings, key=lambda f: {"HIGH": 0, "MEDIUM": 1, "LOW": 2}.get(f[0], 3))
+        evidence = "\n\n".join(f"[{sev}] {title}\n{detail}" for sev, title, detail in ordered[:6])
+        embed.add_field(name="INDICATORS & EVIDENCE", value=evidence[:1024], inline=False)
+        if len(ordered) > 6:
+            embed.add_field(name="Additional indicators", value=f"{len(ordered) - 6} additional rule(s) matched.", inline=False)
     else:
-        embed.add_field(name="CLASSIFICATION", value="No known indicators matched; threat status remains unverified.", inline=False)
+        embed.add_field(name="INDICATORS & EVIDENCE", value="No configured rule matched readable strings.", inline=False)
 
     if notes:
-        embed.add_field(name="ANALYSIS NOTES", value="\n".join("- " + n for n in notes)[:1024], inline=False)
-    embed.add_field(name="LIMITATIONS", value="Static string heuristics only. Obfuscation, encrypted payloads, and runtime-fetched code can evade detection. No malware family name is assigned without evidence.", inline=False)
-    embed.set_footer(text="Do not run suspicious JARs to test them")
+        embed.add_field(name="NETWORK, METADATA & ANALYSIS NOTES", value="\n".join("- " + n for n in notes)[:1024], inline=False)
+    embed.add_field(name="CONFIDENCE", value="Heuristic confidence only. Static strings cannot reliably prove which endpoints execute, what data is transmitted, or whether a file is safe. Obfuscation and runtime downloads may evade this scan.", inline=False)
+    embed.set_footer(text="Multiple indicators need manual confirmation • Never run suspicious JARs")
     return embed
 
 
