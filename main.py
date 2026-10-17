@@ -197,7 +197,7 @@ async def scan(interaction: discord.Interaction, file: discord.Attachment):
         archive_embed.add_field(name="Scan status", value="Analysis in progress", inline=True)
         await archive_channel.send(
             embed=archive_embed,
-            file=discord.File(io.BytesIO(data), filename=file.filename),
+            file=discord.File(io.BytesIO(data), filename=f"scan-upload-{interaction.id}.jar"),
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
