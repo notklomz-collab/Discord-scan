@@ -5,6 +5,7 @@ import re
 import zipfile
 
 import discord
+import aiohttp
 from discord import app_commands
 
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -171,7 +172,14 @@ async def scan(interaction: discord.Interaction, file: discord.Attachment):
     await interaction.response.defer(thinking=True)
     stage = "reading uploaded file"
     try:
-        data = await file.read(use_cached=True)
+        # Download directly from Discord's signed CDN URL. Attachment.read() can
+        # return HTTP 415 "failed to get asset" in some Replit/runtime setups.
+        timeout = aiohttp.ClientTimeout(total=45, connect=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(file.url) as response:
+                if response.status != 200:
+                    raise RuntimeError(f"Attachment CDN returned HTTP {response.status}")
+                data = await response.read()
         if len(data) > MAX_UPLOAD_BYTES:
             await interaction.followup.send("The file exceeded the 20 MB scan limit.", ephemeral=True)
             return
@@ -234,7 +242,7 @@ async def scan(interaction: discord.Interaction, file: discord.Attachment):
             f"Discord request failed during {stage} (HTTP {exc.status}, code {exc.code}). Build: {BUILD_ID}. Check Replit Console.",
             ephemeral=True,
         )
-    except (asyncio.TimeoutError, OSError) as exc:
+    except (asyncio.TimeoutError, OSError, RuntimeError, aiohttp.ClientError) as exc:
         print(f"Scan/archive error during {stage}: {type(exc).__name__}: {exc}")
         await interaction.followup.send(
             f"Scan/archive failed during {stage}: {type(exc).__name__}. Build: {BUILD_ID}. Check Replit Console.",
