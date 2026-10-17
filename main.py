@@ -205,13 +205,24 @@ async def scan(interaction: discord.Interaction, file: discord.Attachment):
         report = make_embed(file.filename, len(data), verdict, findings, notes)
         report.add_field(name="Archived sample", value=f"Original upload was saved to <#{ARCHIVE_CHANNEL_ID}> for review.", inline=False)
         await interaction.followup.send(embed=report)
-    except discord.Forbidden:
+    except discord.Forbidden as exc:
+        print(f"Discord permission error: status={exc.status}, code={exc.code}, text={exc.text}")
         await interaction.followup.send(
-            "I couldn't archive the file. Give the bot View Channel, Send Messages, and Attach Files permissions in the archive channel.",
+            f"Discord denied an action (HTTP {exc.status}, code {exc.code}). Check the Replit Console for details.",
             ephemeral=True,
         )
-    except (discord.HTTPException, asyncio.TimeoutError, OSError) as exc:
-        await interaction.followup.send(f"Scan or archive failed ({type(exc).__name__}). Check the bot's channel permissions and try again.", ephemeral=True)
+    except discord.HTTPException as exc:
+        print(f"Discord HTTP error: status={exc.status}, code={exc.code}, text={exc.text}")
+        await interaction.followup.send(
+            f"Discord request failed (HTTP {exc.status}, code {exc.code}). Check the Replit Console for details.",
+            ephemeral=True,
+        )
+    except (asyncio.TimeoutError, OSError) as exc:
+        print(f"Scan/archive error: {type(exc).__name__}: {exc}")
+        await interaction.followup.send(
+            f"Scan/archive failed: {type(exc).__name__}. Check the Replit Console.",
+            ephemeral=True,
+        )
 
 
 @client.event
