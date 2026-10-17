@@ -195,11 +195,20 @@ async def scan(interaction: discord.Interaction, file: discord.Attachment):
         archive_embed.add_field(name="Submitted by", value=f"{interaction.user} (ID: {interaction.user.id})", inline=False)
         archive_embed.add_field(name="Origin", value=f"<#{interaction.channel_id}>", inline=True)
         archive_embed.add_field(name="Scan status", value="Analysis in progress", inline=True)
+        # Send the file as a plain attachment first. This avoids coupling the
+        # binary upload to an embed request and makes failures easier to diagnose.
         await archive_channel.send(
-            embed=archive_embed,
+            content="UNTRUSTED JAR UPLOAD for security review. Do not run this file.",
             file=discord.File(io.BytesIO(data), filename=f"scan-upload-{interaction.id}.jar"),
             allowed_mentions=discord.AllowedMentions.none(),
         )
+        try:
+            await archive_channel.send(
+                embed=archive_embed,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException as metadata_exc:
+            print(f"Archive metadata message failed after file upload: status={metadata_exc.status}, code={metadata_exc.code}, text={metadata_exc.text}")
 
         verdict, findings, notes = await asyncio.to_thread(scan_jar, data)
         report = make_embed(file.filename, len(data), verdict, findings, notes)
