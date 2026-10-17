@@ -8,6 +8,7 @@ import discord
 from discord import app_commands
 
 TOKEN = os.getenv("DISCORD_TOKEN")
+BUILD_ID = "archive-diagnostic-2026-10-17-v2"
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 MAX_TOTAL_UNCOMPRESSED = 60 * 1024 * 1024
 MAX_ENTRIES = 1500
@@ -168,12 +169,14 @@ async def scan(interaction: discord.Interaction, file: discord.Attachment):
         return
 
     await interaction.response.defer(thinking=True)
+    stage = "reading uploaded file"
     try:
         data = await file.read(use_cached=True)
         if len(data) > MAX_UPLOAD_BYTES:
             await interaction.followup.send("The file exceeded the 20 MB scan limit.", ephemeral=True)
             return
 
+        stage = "fetching archive channel"
         # Archive every submitted JAR in the dedicated review channel.
         # The original file is treated as untrusted and is never executed.
         archive_channel = client.get_channel(ARCHIVE_CHANNEL_ID)
@@ -195,6 +198,7 @@ async def scan(interaction: discord.Interaction, file: discord.Attachment):
         archive_embed.add_field(name="Submitted by", value=f"{interaction.user} (ID: {interaction.user.id})", inline=False)
         archive_embed.add_field(name="Origin", value=f"<#{interaction.channel_id}>", inline=True)
         archive_embed.add_field(name="Scan status", value="Analysis in progress", inline=True)
+        stage = "uploading JAR to archive channel"
         # Send the file as a plain attachment first. This avoids coupling the
         # binary upload to an embed request and makes failures easier to diagnose.
         await archive_channel.send(
@@ -202,6 +206,7 @@ async def scan(interaction: discord.Interaction, file: discord.Attachment):
             file=discord.File(io.BytesIO(data), filename=f"scan-upload-{interaction.id}.jar"),
             allowed_mentions=discord.AllowedMentions.none(),
         )
+        stage = "sending archive metadata"
         try:
             await archive_channel.send(
                 embed=archive_embed,
@@ -210,26 +215,29 @@ async def scan(interaction: discord.Interaction, file: discord.Attachment):
         except discord.HTTPException as metadata_exc:
             print(f"Archive metadata message failed after file upload: status={metadata_exc.status}, code={metadata_exc.code}, text={metadata_exc.text}")
 
+        stage = "scanning JAR"
         verdict, findings, notes = await asyncio.to_thread(scan_jar, data)
         report = make_embed(file.filename, len(data), verdict, findings, notes)
         report.add_field(name="Archived sample", value=f"Original upload was saved to <#{ARCHIVE_CHANNEL_ID}> for review.", inline=False)
+        stage = "sending scan report to original channel"
+        report.set_footer(text=f"Build {BUILD_ID} | Do not run suspicious JARs")
         await interaction.followup.send(embed=report)
     except discord.Forbidden as exc:
-        print(f"Discord permission error: status={exc.status}, code={exc.code}, text={exc.text}")
+        print(f"Discord permission error during {stage}: status={exc.status}, code={exc.code}, text={exc.text}")
         await interaction.followup.send(
-            f"Discord denied an action (HTTP {exc.status}, code {exc.code}). Check the Replit Console for details.",
+            f"Discord denied action during {stage} (HTTP {exc.status}, code {exc.code}). Build: {BUILD_ID}. Check Replit Console.",
             ephemeral=True,
         )
     except discord.HTTPException as exc:
-        print(f"Discord HTTP error: status={exc.status}, code={exc.code}, text={exc.text}")
+        print(f"Discord HTTP error during {stage}: status={exc.status}, code={exc.code}, text={exc.text}")
         await interaction.followup.send(
-            f"Discord request failed (HTTP {exc.status}, code {exc.code}). Check the Replit Console for details.",
+            f"Discord request failed during {stage} (HTTP {exc.status}, code {exc.code}). Build: {BUILD_ID}. Check Replit Console.",
             ephemeral=True,
         )
     except (asyncio.TimeoutError, OSError) as exc:
-        print(f"Scan/archive error: {type(exc).__name__}: {exc}")
+        print(f"Scan/archive error during {stage}: {type(exc).__name__}: {exc}")
         await interaction.followup.send(
-            f"Scan/archive failed: {type(exc).__name__}. Check the Replit Console.",
+            f"Scan/archive failed during {stage}: {type(exc).__name__}. Build: {BUILD_ID}. Check Replit Console.",
             ephemeral=True,
         )
 
@@ -237,7 +245,7 @@ async def scan(interaction: discord.Interaction, file: discord.Attachment):
 @client.event
 async def on_ready():
     await tree.sync()
-    print(f"Logged in as {client.user} (slash commands synced)")
+    print(f"Logged in as {client.user} (slash commands synced; build {BUILD_ID})")
 
 
 if not TOKEN:
