@@ -10,7 +10,7 @@ import aiohttp
 from discord import app_commands
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-BUILD_ID = "slash-attachment-scan-2026-10-17-v1"
+BUILD_ID = "original-filename-archive-2026-10-17-v1"
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 MAX_TOTAL_UNCOMPRESSED = 60 * 1024 * 1024
 MAX_ENTRIES = 1500
@@ -203,7 +203,7 @@ async def process_attachment(attachment, channel, user, origin_channel_id):
         stage = "uploading JAR to archive channel"
         await archive_channel.send(
             content="UNTRUSTED JAR UPLOAD for security review. Do not run this file.",
-            file=discord.File(io.BytesIO(data), filename=f"scan-upload-{user.id}-{int(time.time())}.jar"),
+            file=discord.File(io.BytesIO(data), filename=attachment.filename),
             allowed_mentions=discord.AllowedMentions.none(),
         )
         try:
